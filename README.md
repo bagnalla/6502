@@ -66,7 +66,7 @@ pub struct Cpu {
     pub a: u8,   // accumulator
     // ... more 8-bit registers, including status
 
-    pub io_bus: Arc<AtomicU8>, // data bus for I/O
+    pub io_bus: Rc<Cell<u8>>, // data bus for I/O
 }
 ```
 
@@ -138,7 +138,7 @@ macro_rules! fetch {
     ( $adr:expr ) => {
         {
             yield ($adr, Some(IO::Read));
-            self.io_bus.load(Ordering::Relaxed)
+            self.io_bus.get()
         }
     };
 }
@@ -146,7 +146,7 @@ macro_rules! fetch {
 macro_rules! write {
     ( $adr:expr, $val:expr ) => {
         {
-            self.io_bus.store($val, Ordering::Relaxed);
+            self.io_bus.set($val);
             yield ($adr, Some(IO::Write))
         }
     };
