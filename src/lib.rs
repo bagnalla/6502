@@ -8,10 +8,10 @@
 //   but not in the actual current status register)
 // - plp should not change the B flag (not found by klaus)
 
+use std::cell::Cell;
 use std::ops::{Coroutine};
 use std::fmt;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
+use std::rc::Rc;
 
 use bitflags::bitflags;
 
@@ -41,14 +41,14 @@ pub struct Cpu {
     pub apu_status: Flags,
     pub apu_enabled: bool,
 
-    pub reset_signal: Arc<AtomicBool>,
-    pub irq_signal: Arc<AtomicBool>,
-    pub nmi_signal: Arc<AtomicBool>,
+    pub reset_signal: Rc<Cell<bool>>,
+    pub irq_signal: Rc<Cell<bool>>,
+    pub nmi_signal: Rc<Cell<bool>>,
 
-    pub io_bus: Arc<AtomicU8>,
+    pub io_bus: Rc<Cell<u8>>,
 
     // Only updates at the start of each new instruction.
-    pub pc_monitor: Arc<AtomicU16>,
+    pub pc_monitor: Rc<Cell<u16>>,
 }
 
 impl fmt::Display for Cpu {
@@ -109,11 +109,12 @@ impl Cpu {
             status: Flags::I | Flags::U,
             apu_status: Flags::empty(),
             apu_enabled: true,
-            reset_signal: Arc::new(AtomicBool::new(false)),
-            irq_signal: Arc::new(AtomicBool::new(false)),
-            nmi_signal: Arc::new(AtomicBool::new(false)),
-            io_bus: Arc::new(AtomicU8::new(0)),
-            pc_monitor: Arc::new(AtomicU16::new(0)),
+            // reset_signal: Rc::new(AtomicBool::new(false)),
+            reset_signal: Rc::new(Cell::new(false)),
+            irq_signal: Rc::new(Cell::new(false)),
+            nmi_signal: Rc::new(Cell::new(false)),
+            io_bus: Rc::new(Cell::new(0)),
+            pc_monitor: Rc::new(Cell::new(0)),
         }
     }
     fn set_flag(&mut self, f: Flags, b: bool) {
@@ -159,7 +160,7 @@ impl Cpu {
     }
 
     pub fn update_monitor(&self) {
-        self.pc_monitor.store(self.pc, Ordering::Relaxed);
+        self.pc_monitor.set(self.pc);
     }
 
     pub fn run(&mut self)
@@ -169,7 +170,7 @@ impl Cpu {
             ( $adr:expr ) => {
                 {
                     yield ($adr, Some(IO::Read));
-                    self.io_bus.load(Ordering::Relaxed)
+                    self.io_bus.get()
                 }
             };
         }
@@ -177,7 +178,7 @@ impl Cpu {
         macro_rules! write {
             ( $adr:expr, $val:expr ) => {
                 {
-                    self.io_bus.store($val, Ordering::Relaxed);
+                    self.io_bus.set($val);
                     yield ($adr, Some(IO::Write))
                 }
             };
@@ -188,7 +189,7 @@ impl Cpu {
                 {
                     yield (self.pc, Some(IO::Read));
                     self.pc = self.pc.wrapping_add(1);
-                    self.io_bus.load(Ordering::Relaxed)
+                    self.io_bus.get()
                 }
             };
         }
@@ -253,7 +254,7 @@ impl Cpu {
                 self.update_monitor();
 
                 // Poll reset/interrupt signals
-                if self.reset_signal.load(Ordering::Relaxed) {
+                if self.reset_signal.get() {
                     // Wait for signal to be cleared to actually proceed?
                     // while self.reset_signal.load(Ordering::Relaxed) {
                     //  cycle!()
@@ -268,10 +269,10 @@ impl Cpu {
                     self.set_flag(Flags::I, true);
                     let pch = fetch!(0xFFFD) as u16;
                     self.pc = (pch << 8) | pcl;
-                    self.reset_signal.store(false, Ordering::Relaxed);
+                    self.reset_signal.set(false)
                 }
 
-                if self.nmi_signal.load(Ordering::Relaxed) {
+                if self.nmi_signal.get() {
                     // println!("NMI!");
                     let _ = fetch!(self.pc);
                     let _ = fetch!(self.pc);
@@ -284,11 +285,11 @@ impl Cpu {
                     self.set_flag(Flags::I, true); // Conflicting documentation
                     let pch = fetch!(0xFFFB) as u16;
                     self.pc = (pch << 8) | pcl;
-                    self.nmi_signal.store(false, Ordering::Relaxed);
+                    self.nmi_signal.set(false);
                     continue
                 }
 
-                if self.irq_signal.load(Ordering::Relaxed) && !self.get_flag(Flags::I) {
+                if self.irq_signal.get() && !self.get_flag(Flags::I) {
                     // println!("IRQ!");
                     let _ = fetch!(self.pc);
                     let _ = fetch!(self.pc);
@@ -297,18 +298,18 @@ impl Cpu {
                     push!((self.pc & 0x00FF) as u8); // Push PCL
                     self.set_flag(Flags::U, true);
                     push!(self.status.bits());
-                    if self.nmi_signal.load(Ordering::Relaxed) {
+                    if self.nmi_signal.get() {
                         let pcl = fetch!(0xFFFA) as u16;
                         self.set_flag(Flags::I, true); // Conflicting documentation
                         let pch = fetch!(0xFFFB) as u16;
                         self.pc = (pch << 8) | pcl;
-                        self.nmi_signal.store(false, Ordering::Relaxed);
+                        self.nmi_signal.set(false);
                     } else {
                         let pcl = fetch!(0xFFFE) as u16;
                         self.set_flag(Flags::I, true);
                         let pch = fetch!(0xFFFF) as u16;
                         self.pc = (pch << 8) | pcl;
-                        self.irq_signal.store(false, Ordering::Relaxed);
+                        self.irq_signal.set(false);
                     }
                     continue
                 }
@@ -760,7 +761,7 @@ impl Cpu {
                         push!(self.status.bits());
                         // self.set_flag(Flags::I, true); // ???
                         // Check for NMI hijack
-                        if self.nmi_signal.load(Ordering::Relaxed) {
+                        if self.nmi_signal.get() {
                             let pcl = fetch!(0xFFFA) as u16;
                             self.set_flag(Flags::I, true);
                             let pch = fetch!(0xFFFB) as u16;
@@ -1141,14 +1142,14 @@ mod tests {
                                      expected {:x}, got {:x}",
                                     event, addr, test_val, mem[addr as usize]))
                             }
-                            cpu_bus.store(mem[addr as usize], Ordering::Relaxed)
+                            cpu_bus.set(mem[addr as usize])
                         }
                         Some(IO::Write) => {
                             if test_rw != "write" || addr != test_addr {
                                 return Err(format!("expected '{} {:04x}', got {:?} {}",
                                                    test_rw, test_addr, event, addr))
                             }
-                            mem[addr as usize] = cpu_bus.load(Ordering::Relaxed)
+                            mem[addr as usize] = cpu_bus.get()
                         }
                         None => ()
                     }
@@ -1207,7 +1208,7 @@ mod tests {
         let mut same_pc_counter = 0;
         loop {
             n += 1;
-            let pc = pc_monitor.load(Ordering::Relaxed);
+            let pc = pc_monitor.get();
             if pc == old_pc {
                 same_pc_counter += 1;
                 if same_pc_counter >= 10 {
@@ -1222,10 +1223,10 @@ mod tests {
                 CoroutineState::Yielded((addr, event)) => {
                     match event {
                         Some(IO::Read) => {
-                            cpu_bus.store(mem[addr as usize], Ordering::Relaxed)
+                            cpu_bus.set(mem[addr as usize])
                         }
                         Some(IO::Write) => {
-                            mem[addr as usize] = cpu_bus.load(Ordering::Relaxed)
+                            mem[addr as usize] = cpu_bus.get()
                         }
                         None => ()
                     }
@@ -1277,16 +1278,16 @@ mod tests {
             let nmi = mem[FEEDBACK_ADDR] & NMI_BIT != 0;
             if nmi && !prev_nmi {
                 println!("triggering nmi");
-                nmi_signal.store(true, Ordering::Relaxed);
+                nmi_signal.set(true);
             }
             if irq && !prev_irq {
                 println!("triggering irq");
-                irq_signal.store(true, Ordering::Relaxed);
+                irq_signal.set(true);
             }
             prev_irq = irq;
             prev_nmi = nmi;
 
-            let pc = pc_monitor.load(Ordering::Relaxed);
+            let pc = pc_monitor.get();
             if pc == old_pc {
                 same_pc_counter += 1;
                 if same_pc_counter >= 10 {
@@ -1301,10 +1302,10 @@ mod tests {
                 CoroutineState::Yielded((addr, event)) => {
                     match event {
                         Some(IO::Read) => {
-                            cpu_bus.store(mem[addr as usize], Ordering::Relaxed)
+                            cpu_bus.set(mem[addr as usize])
                         }
                         Some(IO::Write) => {
-                            mem[addr as usize] = cpu_bus.load(Ordering::Relaxed)
+                            mem[addr as usize] = cpu_bus.get()
                         }
                         None => ()
                     }
